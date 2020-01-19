@@ -1,40 +1,44 @@
 #include "Arduino.h"
-#include <OneWire.h>
-#include <DallasTemperature.h>
-
-#define ONE_WIRE_BUS 2
 
 using namespace std;
 
 const int LED_R = 5; // digital output pin for LED red channel
 const int LED_G = 3; // digital output pin for LED green channel
 const int LED_B = 6; // digital output pin for LED blue channel
+const int PIR_IN = 4; // digital input pin for PIR sensor
 
 int rgb[3];  // 0-255 RGB values for the LEDs
 
+int TICK_INTERVAL = 100; // time to wait between loops milliseconds
+int FADE_TIME = 5000; // time to fade in / out in milliseconds
+int MIN_ON_TIME = 10000; // minimum time to spend in on state milliseconds
+
+uint8_t MAX_BRIGHTNESS = 255;
+
+int brightness = 0; // led brightness
+uint8_t hue = 0; // led hue
+
+long previousTime;
+long offTime;
+long pirOnTime; // time when pir sensor goes from off to on
+long pirOffTime; // time when pir sensor goes from on to off
+bool pir; // state of the pir sensor
+
+enum stateEnum { off, rising, on, falling };
+
+stateEnum state = off;
+
 void getRGB(int hue, int sat, int val, int colors[3]);
-
-const uint32_t T_COLD = 2000; // 20C for lower bound
-const int HUE_COLD = 180; // cyan-ish hue
-const int SAT_COLD = 255; // maximum color
-
-const uint32_t T_HOT = 4000; // 40C for upper bound
-const int HUE_HOT = 360; // red hue
-const int SAT_HOT = 255; // maximum color
-
-OneWire oneWire(ONE_WIRE_BUS); // initialize 1-wire bus
-
-DallasTemperature sensors(&oneWire); // initialize DS18B20 on 1-wire bus
 
 void setup() {
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
+  pinMode(PIR_IN, INPUT);
 
   calibrationSequence();
 
   Serial.begin(9600);
-  sensors.begin();
 }
 
 void calibrationSequence() {
@@ -56,34 +60,59 @@ void calibrationSequence() {
 }
 
 void loop() {
-  sensors.requestTemperatures();
-  uint32_t celcius = (uint32_t) (100 * sensors.getTempCByIndex(0));  // will be temperature multiplied by 100
+  int dt = millis() - previousTime;
 
-  /*  constrain temperature to upper & lower bounds so we don't output
-      the wrong color if the temp is outside the upper/lower bounds */
-  uint32_t celcius_c = constrain(celcius, T_COLD, T_HOT);
+  // check previous pir state against current state
+  if (!pir && digitalRead(PIR_IN)) { pirOnTime = millis(); }
+  if (pir && !digitalRead(PIR_IN)) { pirOffTime = millis(); }
 
-  // linear map hue and saturation values based on the temperature
-  uint32_t hue = map(celcius_c, T_COLD, T_HOT, HUE_COLD, HUE_HOT);
-  uint32_t sat = map(celcius_c, T_COLD, T_HOT, SAT_COLD, SAT_HOT);
+  // update current pir state
+  pir = digitalRead(PIR_IN);
+
+  // OFF -> RISING
+  if ( state == off && pir ) { state = rising; }
+
+  // RISING -> ON
+  if ( state == rising && brightness == MAX_BRIGHTNESS) { state = on; }
+
+  // ON -> FALLING
+  if ( state == on && !pir && millis() - offTime > MIN_ON_TIME ) { state = falling; }
+
+  // FALLING -> OFF
+  if ( state == falling && brightness == 0 ) {
+    state = off;
+    hue = random(0, 360);
+  }
+
+  // FALLING -> RISING
+  if ( state == falling && pir ) { state = rising; }
+
+  switch (state) {
+    case rising:
+      brightness += MAX_BRIGHTNESS
+                    * dt
+                    / FADE_TIME;
+      brightness = min(MAX_BRIGHTNESS, brightness); // clamp brigtness at 255
+      break;
+    case falling:
+      brightness -= MAX_BRIGHTNESS
+                    * dt
+                    / FADE_TIME ;
+      brightness = max(0, brightness); // clamp brigtness at 0
+      break;
+  }
 
   // convert HSV to RGB
   // We always want value = 255 for maximum brightness
-  getRGB(hue, sat, 255, rgb);
+  getRGB(hue, 255, 255, rgb);
 
   // write the RGB values to the LED strip
   led(rgb);
 
   // Debug serial output
-  Serial.print("T: "); Serial.print(celcius);
-  Serial.print("\tH: "); Serial.print(hue);
-  Serial.print("\tS: "); Serial.println(sat);
-  delay(1000);
-
-  if (celcius > T_HOT) {
-    led(0, 0, 0); // flash LEDs if we've exceeded the upper temperature limit
-    delay(500);
-  }
+  Serial.print("B: "); Serial.print(brightness);
+  Serial.print("\tPIR: "); Serial.println(pir);
+  delay(TICK_INTERVAL);
 }
 
 void led(int r, int g, int b) {
